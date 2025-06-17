@@ -6,230 +6,157 @@ Functions for saving and publishing data quality results to lakehouse.
 
 import re
 from datetime import datetime
+import pandas as pd
 
-def save_results_to_lakehouse(validator, project_name, spark_session, 
-                             lakehouse_path="abfss://DATA_QUALITY_WS@onelake.dfs.fabric.microsoft.com/LH_DATA_QUALITY.Lakehouse/Files", 
-                             output_format="parquet"):
+def save_results_to_lakehouse(validator, project_name, subproject_id, spark_session, lakehouse_path):
     """
-    Save validation results to files in the specified lakehouse
+    Save validation results into a timestamped folder in the lakehouse.
+    The folder structure will be {lakehouse_path}/{project_name}/{subproject_id}/{timestamp}.
     
     Args:
-        validator: DataGovernance instance with validation results
-        project_name: Name of the project (will be used in folder path)
-        spark_session: Spark session for lakehouse operations
-        lakehouse_path: Path to the lakehouse where files will be saved
-        output_format: Format to save files (parquet, delta)
+        validator: DataGovernance instance with validation results.
+        project_name (str): The user-defined name of the project (e.g., "QMS").
+        subproject_id (str): The user-defined name of the subproject (e.g., "Handoff 6").
+        spark_session: Active Spark session.
+        lakehouse_path: Base path in the lakehouse for storing results.
         
     Returns:
-        Dictionary with paths to saved files and timestamp
+        Dictionary with paths to the saved files and the timestamp.
     """
-    # Validate and clean project name
-    if not project_name or not isinstance(project_name, str):
-        raise ValueError("Project name must be a non-empty string")
+    if not project_name or not subproject_id:
+        raise ValueError("Project name and subproject ID must be non-empty strings")
     
-    # Clean project name for file system path
     project_name_safe = re.sub(r'[^a-zA-Z0-9_]', '_', project_name)
+    subproject_id_safe = re.sub(r'[^a-zA-Z0-9_]', '_', subproject_id)
+    timestamp_folder = datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    # Create timestamp for folder
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = f"{lakehouse_path}/{project_name_safe}/{subproject_id_safe}/{timestamp_folder}"
     
-    # New folder structure: {lakehouse_path}/{project_name}/{timestamp}
-    output_path = f"{lakehouse_path}/{project_name_safe}/{timestamp}"
+    print(f"Saving results to: {output_path}")
     
-    # Extract validation results
-    summary_stats = validator.get_summary_stats()
-    detailed_results = validator.get_detailed_results()
-    
-    # Convert to Spark DataFrames and save
-    paths = {
-        "timestamp": timestamp, 
+    # Generate the three dataframes
+    project_summary_data = validator.get_summary_stats(project_name, subproject_id)
+    detailed_rules_df = validator.get_detailed_results(project_name, subproject_id)
+    issues_outliers_df = validator.get_issues_and_outliers(project_name, subproject_id)
+
+    saved_paths = {
+        "timestamp": timestamp_folder,
         "project_name": project_name,
-        "project_name_safe": project_name_safe,
-        "base_path": f"{lakehouse_path}/{project_name_safe}"
+        "subproject_id": subproject_id,
+        "base_path": output_path
     }
-    
+
     try:
-        print(f"Saving results to project folder: {project_name_safe}")
-        print(f"Timestamp folder: {timestamp}")
-        
-        # Save summary statistics
-        if summary_stats:
-            summary_df = spark_session.createDataFrame(summary_stats)
-            summary_path = f"{output_path}/validation_summary"
-            summary_df.write.format(output_format).mode("overwrite").save(summary_path)
-            paths["summary"] = summary_path
-        
-        # Save detailed validation results
-        if detailed_results is not None:
-            detailed_spark_df = spark_session.createDataFrame(detailed_results)
-            details_path = f"{output_path}/validation_details"
-            detailed_spark_df.write.format(output_format).mode("overwrite").save(details_path)
-            paths["details"] = details_path
-        
-        # Save per-table validation results
-        formatted_results = validator.format_all_results()
-        for table_name, result in formatted_results.items():
-            # Convert result to DataFrame format
-            result_rows = []
-            for expectation in result.get("results", []):
-                expectation_config = expectation.get("expectation_config", {})
-                row = {
-                    "table_name": table_name,
-                    "expectation_type": expectation_config.get("type", ""),
-                    "column": expectation_config.get("kwargs", {}).get("column", ""),
-                    "success": expectation.get("success", False),
-                    "parameters": str(expectation_config.get("kwargs", {})),
-                    "details": str(expectation.get("result", {})),
-                    "timestamp": timestamp
-                }
-                result_rows.append(row)
-            
-            if result_rows:
-                table_result_df = spark_session.createDataFrame(result_rows)
-                table_path = f"{output_path}/{table_name}_results"
-                table_result_df.write.format(output_format).mode("overwrite").save(table_path)
-                paths[f"{table_name}_results"] = table_path
-        
-        print(f"✅ Saved validation results to {output_path}")
-        
+        # 1. Save Project Summary
+        if project_summary_data:
+            summary_spark_df = spark_session.createDataFrame(pd.DataFrame(project_summary_data))
+            summary_path = f"{output_path}/project_summary"
+            summary_spark_df.write.format("parquet").mode("overwrite").save(summary_path)
+            saved_paths["project_summary"] = summary_path
+            print(f"✅ Saved Project Summary to {summary_path}")
+
+        # 2. Save Detailed Rules
+        if not detailed_rules_df.empty:
+            detailed_spark_df = spark_session.createDataFrame(detailed_rules_df)
+            details_path = f"{output_path}/detailed_rules"
+            detailed_spark_df.write.format("parquet").mode("overwrite").save(details_path)
+            saved_paths["detailed_rules"] = details_path
+            print(f"✅ Saved Detailed Rules to {details_path}")
+
+        # 3. Save Issues and Outliers
+        if not issues_outliers_df.empty:
+            issues_spark_df = spark_session.createDataFrame(issues_outliers_df)
+            issues_path = f"{output_path}/issues_outliers"
+            issues_spark_df.write.format("parquet").mode("overwrite").save(issues_path)
+            saved_paths["issues_outliers"] = issues_path
+            print(f"✅ Saved Issues & Outliers to {issues_path}")
+
     except Exception as e:
         print(f"❌ Error saving results to lakehouse: {str(e)}")
         raise
     
-    return paths
+    return saved_paths
 
-def publish_to_tables(paths, project_name, spark_session, 
-                     target_database="LH_DATA_QUALITY", 
-                     specific_timestamp=None):
+def publish_results_to_tables(project_name, subproject_id, timestamp, spark_session, lakehouse_path, target_database):
     """
-    Publish saved files as tables in the lakehouse
-    
+    Publishes (appends) data from a specific timestamped run to the final Delta tables.
+
     Args:
-        paths: Dictionary with paths to files
-        project_name: Name of the project (used for table naming)
-        spark_session: Spark session for lakehouse operations
-        target_database: Database where tables will be created
-        specific_timestamp: Optional specific timestamp to publish
-        
-    Returns:
-        List of published table names
+        project_name (str): The name of the project.
+        subproject_id (str): The name of the subproject.
+        timestamp (str): The timestamp folder to publish from (e.g., "20250530_104439").
+        spark_session: Active Spark session.
+        lakehouse_path: Base path where results are stored.
+        target_database (str): The target database for the final tables.
     """
-    # Validate project name
-    if not project_name or not isinstance(project_name, str):
-        raise ValueError("Project name must be a non-empty string")
+    project_name_safe = re.sub(r'[^a-zA-Z0-9_]', '_', project_name)
+    subproject_id_safe = re.sub(r'[^a-zA-Z0-9_]', '_', subproject_id)
+    source_path_base = f"{lakehouse_path}/{project_name_safe}/{subproject_id_safe}/{timestamp}"
     
-    # Get the safe project name from paths or create it
-    project_name_safe = paths.get("project_name_safe", re.sub(r'[^a-zA-Z0-9_]', '_', project_name))
+    publication_map = {
+        "project_summary": "Project_Summary",
+        "detailed_rules": "Detailed_Rules",
+        "issues_outliers": "Issues_Outliers"
+    }
+
+    print(f"📅 Publishing results for '{project_name} - {subproject_id}' from timestamp: {timestamp}")
     
-    published_tables = []
-    
-    # Filter paths by timestamp if specified
-    if specific_timestamp:
-        filtered_paths = {}
-        base_path = paths.get("base_path", "")
+    for source_file, target_table_name in publication_map.items():
+        source_parquet_path = f"{source_path_base}/{source_file}"
+        full_table_name = f"{target_database}.{target_table_name}"
         
-        if base_path:
-            # Construct paths for the specific timestamp
-            specific_folder = f"{base_path}/{specific_timestamp}"
-            
-            # Reconstruct paths for specific timestamp
-            for key, path in paths.items():
-                if key in ["timestamp", "project_name", "project_name_safe", "base_path"]:
-                    continue
-                    
-                # Extract the file name from the original path
-                file_name = path.split('/')[-1]
-                new_path = f"{specific_folder}/{file_name}"
-                filtered_paths[key] = new_path
-        else:
-            # Fallback: filter by timestamp in path
-            for key, path in paths.items():
-                if key in ["timestamp", "project_name", "project_name_safe", "base_path"]:
-                    continue
-                if specific_timestamp in path:
-                    filtered_paths[key] = path
-        
-        if not filtered_paths:
-            print(f"❌ No paths found with timestamp {specific_timestamp}")
-            return []
-        
-        paths_to_publish = filtered_paths
-        print(f"📅 Publishing specific timestamp: {specific_timestamp}")
-    else:
-        # Skip the metadata entries
-        paths_to_publish = {k: v for k, v in paths.items() 
-                           if k not in ["timestamp", "project_name", "project_name_safe", "base_path"]}
-        current_timestamp = paths.get("timestamp", "current")
-        print(f"📅 Publishing latest timestamp: {current_timestamp}")
-    
-    # Use only the first part of the database name (no dots)
-    if '.' in target_database:
-        clean_db_name = target_database.split('.')[0]
-    else:
-        clean_db_name = target_database
-    
-    print(f"🗄️  Using database: {clean_db_name}")
-    print(f"📁 Project folder: {project_name_safe}")
-    
-    # Publish each path as a table
-    for file_type, path in paths_to_publish.items():
         try:
-            # Create table name from project and file type
-            table_name = f"{project_name_safe}_{file_type}"
-            
-            # Read the data - use parquet format since that's how we saved it
-            print(f"📖 Reading from path: {path}")
-            df = spark_session.read.format("parquet").load(path)
-            
-            # Check if we actually got data
-            if df is None:
-                print(f"❌ Error: No data found at path {path}")
+            print(f"📖 Reading from path: {source_parquet_path}")
+            df_to_append = spark_session.read.format("parquet").load(source_parquet_path)
+
+            if df_to_append.rdd.isEmpty():
+                print(f"⚠️ No data found at {source_parquet_path}. Skipping table '{full_table_name}'.")
                 continue
-                
-            row_count = df.count()
-            print(f"📊 Loaded {row_count} rows for {file_type}")
-            
-            # Write directly to the table
-            full_table_name = f"{clean_db_name}.{table_name}"
-            print(f"💾 Writing to table: {full_table_name}")
-            
-            # Simple direct write with overwrite
-            df.write.format("delta").mode("overwrite").option("overwriteSchema", "true").saveAsTable(full_table_name)
-            
-            published_tables.append(table_name)
-            print(f"✅ Successfully published table: {table_name}")
-            
+
+            print(f"💾 Appending {df_to_append.count()} rows to table: {full_table_name}")
+            df_to_append.write.format("delta").mode("append").option("mergeSchema", "true").saveAsTable(full_table_name)
+            print(f"✅ Successfully appended to table: {full_table_name}")
+
         except Exception as e:
-            print(f"❌ Error publishing {file_type}: {str(e)}")
-            
-            # Try alternative approach with temp view
-            try:
-                print("🔄 Attempting alternative approach with temporary view...")
-                
-                # Make sure df is defined before using it
-                if 'df' not in locals() or df is None:
-                    print(f"📖 Re-reading data from {path}")
-                    df = spark_session.read.format("parquet").load(path)
-                
-                temp_view_name = f"temp_view_{file_type}_{int(time.time())}"
-                df.createOrReplaceTempView(temp_view_name)
-                
-                # Use the database
-                spark_session.sql(f"USE {clean_db_name}")
-                
-                # Drop table if exists and create new one
-                spark_session.sql(f"DROP TABLE IF EXISTS {table_name}")
-                spark_session.sql(f"CREATE TABLE {table_name} USING DELTA AS SELECT * FROM {temp_view_name}")
-                
-                # Clean up temp view
-                spark_session.sql(f"DROP VIEW {temp_view_name}")
-                
-                published_tables.append(table_name)
-                print(f"✅ Successfully published table using alternative approach: {table_name}")
-                
-            except Exception as e2:
-                print(f"❌ Alternative approach also failed: {str(e2)}")
-                print(f"⏭️  Skipping {file_type}")
+            if "Path does not exist" in str(e):
+                 print(f"⚠️ Source path not found: {source_parquet_path}. Skipping.")
+            else:
+                print(f"❌ Error publishing to {full_table_name}: {str(e)}")
+
+def delete_data_by_timestamp(project_name, subproject_id, execution_iso_timestamp, spark_session, target_database):
+    """
+    Deletes all data associated with a specific project, subproject, and timestamp from the master tables.
+
+    Args:
+        project_name (str): The project name to filter by.
+        subproject_id (str): The subproject name to filter by.
+        execution_iso_timestamp (str): The ISO format UTC timestamp string to delete.
+        spark_session: Active Spark session.
+        target_database (str): The database containing the tables.
+    """
+    if not all([project_name, subproject_id, execution_iso_timestamp]):
+        raise ValueError("Project name, subproject ID, and timestamp must be provided.")
+        
+    tables_to_clean = ["Project_Summary", "Detailed_Rules", "Issues_Outliers"]
     
-    print(f"🎉 Published {len(published_tables)} tables successfully")
-    return published_tables
+    print(f"🗑️  Attempting to delete data for '{project_name} - {subproject_id}' with timestamp '{execution_iso_timestamp}'...")
+    
+    for table in tables_to_clean:
+        full_table_name = f"{target_database}.{table}"
+        try:
+            from delta.tables import DeltaTable
+            delta_table = DeltaTable.forName(spark_session, full_table_name)
+            
+            # More specific delete condition
+            condition = f"project_id = '{project_name}' AND subproject_id = '{subproject_id}' AND timestamp = '{execution_iso_timestamp}'"
+            print(f"Executing DELETE on {full_table_name} with condition: {condition}")
+            
+            result = delta_table.delete(condition=condition)
+            
+            print(f"✅ Successfully deleted data from {full_table_name}.")
+            
+            print(f"VACCUMing table {full_table_name} to clean up old files...")
+            delta_table.vacuum()
+
+        except Exception as e:
+            print(f"❌ Error deleting data from {full_table_name}: {str(e)}")
