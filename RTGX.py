@@ -109,41 +109,82 @@ def validate_data(datasets, rules=None, primary_keys=None):
     results = validator.run_all_validations()
     return validator
 
-def save_results(validator, output_dir, format="json"):
+# (Keep your existing load_data, analyze_data, validate_data functions)
+
+def save_validation_results(validator, project_name, subproject_id, spark_session, lakehouse_path):
     """
-    Save validation results to files
+    Saves the complete validation results to a timestamped folder in the lakehouse.
+
+    Args:
+        validator: The DataGovernance instance after running validations.
+        project_name (str): The user-defined name of the project.
+        subproject_id (str): The user-defined name of the subproject.
+        spark_session: Active Spark session.
+        lakehouse_path: Base path in the lakehouse.
+
+    Returns:
+        Dictionary with run details including the generated timestamp.
+    """
+    from data_lakehouse import save_results_to_lakehouse
+    
+    print("\n--- Saving Validation Results to Lakehouse ---")
+    run_details = save_results_to_lakehouse(
+        validator=validator,
+        project_name=project_name,
+        subproject_id=subproject_id,
+        spark_session=spark_session,
+        lakehouse_path=lakehouse_path
+    )
+    print("--- Save Complete ---")
+    return run_details
+
+def publish_run_to_master_tables(project_name, subproject_id, timestamp, spark_session, lakehouse_path, target_database):
+    """
+    Publishes (appends) the results of a specific run to the master Delta tables.
     
     Args:
-        validator: DataGovernance instance with validation results
-        output_dir: Directory to save results
-        format: Output format (json or csv)
-        
-    Returns:
-        Dictionary with paths to saved files
+        project_name (str): The name of the project.
+        subproject_id (str): The name of the subproject.
+        timestamp (str): The timestamp folder of the run to publish.
+        spark_session: Active Spark session.
+        lakehouse_path: Base path where results are stored.
+        target_database (str): The database for the master tables.
     """
-    os.makedirs(output_dir, exist_ok=True)
+    from data_lakehouse import publish_results_to_tables
     
-    # Extract and save results
-    results = validator.validation_results
-    paths = {}
+    print(f"\n--- Publishing Run {timestamp} to Master Tables ---")
+    publish_results_to_tables(
+        project_name=project_name,
+        subproject_id=subproject_id,
+        timestamp=timestamp,
+        spark_session=spark_session,
+        lakehouse_path=lakehouse_path,
+        target_database=target_database
+    )
+    print("--- Publication Complete ---")
+
+def remove_run_from_master_tables(project_name, subproject_id, execution_iso_timestamp, spark_session, target_database):
+    """
+    Deletes all records associated with a specific run from the master tables.
+
+    Args:
+        project_name (str): The name of the project to delete from.
+        subproject_id (str): The name of the subproject to delete from.
+        execution_iso_timestamp (str): The ISO-formatted execution timestamp to remove.
+        spark_session: Active Spark session.
+        target_database (str): The database containing the master tables.
+    """
+    from data_lakehouse import delete_data_by_timestamp
     
-    if format == "json":
-        with open(f"{output_dir}/validation_results.json", "w") as f:
-            json.dump(validator.format_all_results(), f, indent=2, default=str)
-        paths["results"] = f"{output_dir}/validation_results.json"
-    else:
-        # Save as CSV
-        summary_df = pd.DataFrame(validator.get_summary_stats())
-        summary_df.to_csv(f"{output_dir}/validation_summary.csv", index=False)
-        paths["summary"] = f"{output_dir}/validation_summary.csv"
-        
-        # Save detailed results
-        detailed_df = validator.get_detailed_results()
-        if detailed_df is not None:
-            detailed_df.to_csv(f"{output_dir}/validation_details.csv", index=False)
-            paths["details"] = f"{output_dir}/validation_details.csv"
-    
-    return paths
+    print(f"\n--- Deleting Run {execution_iso_timestamp} from Master Tables ---")
+    delete_data_by_timestamp(
+        project_name=project_name,
+        subproject_id=subproject_id,
+        timestamp_to_delete=execution_iso_timestamp,
+        spark_session=spark_session,
+        target_database=target_database
+    )
+    print("--- Deletion Complete ---")
 
 def export_rules_summary(validator, output_path="rules_summary.xlsx"):
     """
