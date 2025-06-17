@@ -721,62 +721,118 @@ class DataGovernance:
             formatted[table_name] = self._format_result(table_name, result)
         return formatted
     
-    def get_summary_stats(self):
+    def get_summary_stats(self, project_name, subproject_id):
         """
-        Get summary statistics of validation results
-        
+        Get summary statistics of validation results formatted for the Project Summary table.
+    
+        Args:
+            project_name (str): The user-defined name of the project (e.g., "QMS").
+            subproject_id (str): The user-defined name of the subproject (e.g., "Handoff 6").
+    
         Returns:
-            List of summary dictionaries
+            List of summary dictionaries.
         """
         summary = []
+        execution_timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        
         for table_name, result in self.validation_results.items():
             formatted = self._format_result(table_name, result)
+            stats = formatted.get("statistics", {})
+            
+            # Calculate a simple quality score
+            quality_score = stats.get("success_percent", 0.0)
+    
             summary.append({
+                "project_id": project_name,
+                "subproject_id": subproject_id,
                 "table_name": table_name,
-                "success": formatted["success"],
-                "evaluated_expectations": formatted["statistics"]["evaluated_expectations"],
-                "successful_expectations": formatted["statistics"]["successful_expectations"],
-                "unsuccessful_expectations": formatted["statistics"]["unsuccessful_expectations"],
-                "success_percent": formatted["statistics"]["success_percent"],
-                "timestamp": datetime.datetime.now().isoformat()
+                "timestamp": execution_timestamp,
+                "success_rate": stats.get("success_percent", 0.0),
+                "quality_score": quality_score,
+                "evaluated_expectations": stats.get("evaluated_expectations", 0),
+                "successful_expectations": stats.get("successful_expectations", 0),
+                "unsuccessful_expectations": stats.get("unsuccessful_expectations", 0),
+                "row_count": len(self.dataframes.get(table_name, pd.DataFrame())),
+                "status": "Success" if formatted.get("success") else "Failure"
             })
         return summary
     
-    def get_detailed_results(self):
+    def get_detailed_results(self, project_name, subproject_id):
         """
-        Get detailed validation results
+        Get detailed validation results formatted for the Detailed Rules table.
         
+        Args:
+            project_name (str): The user-defined name of the project.
+            subproject_id (str): The user-defined name of the subproject.
+    
         Returns:
-            Pandas DataFrame with detailed results
+            Pandas DataFrame with detailed results.
         """
         details = []
+        execution_timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    
         for table_name, result in self.validation_results.items():
             formatted = self._format_result(table_name, result)
             
             for expectation_result in formatted.get("results", []):
                 expectation_config = expectation_result.get("expectation_config", {})
+                kwargs = expectation_config.get("kwargs", {})
                 
                 detail = {
+                    "project_id": project_name,
+                    "subproject_id": subproject_id,
                     "table_name": table_name,
-                    "column_name": expectation_config.get("kwargs", {}).get("column", "Table"),
-                    "expectation_type": expectation_config.get("type", "unknown"),
+                    "column_name": kwargs.get("column", "Table-level"),
+                    "rule_name": expectation_config.get("type", "unknown"),
+                    "timestamp": execution_timestamp,
                     "success": expectation_result.get("success", False),
-                    "rule_parameters": str(expectation_config.get("kwargs", {})),
+                    "rule_parameters": str(kwargs),
                 }
-                
-                # Add failure details if available
-                if not expectation_result.get("success", False) and "result" in expectation_result:
-                    result_data = expectation_result["result"]
-                    detail["unexpected_count"] = result_data.get("unexpected_count", 0)
-                    detail["unexpected_percent"] = result_data.get("unexpected_percent", 0)
-                    detail["partial_unexpected_list"] = str(result_data.get("partial_unexpected_list", []))
-                
                 details.append(detail)
         
-        if details:
-            return pd.DataFrame(details)
-        else:
-            return None
+        return pd.DataFrame(details) if details else pd.DataFrame()
+    
+    def get_issues_and_outliers(self, project_name, subproject_id):
+        """
+        Get failed expectations formatted for the Issues & Outliers table.
+        
+        Args:
+            project_name (str): The user-defined name of the project.
+            subproject_id (str): The user-defined name of the subproject.
+    
+        Returns:
+            Pandas DataFrame with issues and outliers.
+        """
+        issues = []
+        execution_timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    
+        for table_name, result in self.validation_results.items():
+            formatted = self._format_result(table_name, result)
+            
+            failed_expectations = [r for r in formatted.get("results", []) if not r.get("success", False)]
+            
+            for failure in failed_expectations:
+                config = failure.get("expectation_config", {})
+                kwargs = config.get("kwargs", {})
+                result_data = failure.get("result", {})
+                
+                issue = {
+                    "project_id": project_name,
+                    "subproject_id": subproject_id,
+                    "timestamp": execution_timestamp,
+                    "location": f"{table_name}.{kwargs.get('column', 'Table')}",
+                    "classification_severity": "High" if "not_null" in config.get("type", "") else "Medium",
+                    "classification_type": self._categorize_rule(config.get("type", "")),
+                    "details_actual": f"Found {result_data.get('unexpected_count', 0)} unexpected values.",
+                    "details_expected": str(kwargs),
+                    "root_cause_patterns": f"Failed expectation: {config.get('type', '')}",
+                    "partial_unexpected_list": str(result_data.get("partial_unexpected_list", [])),
+                    "resolution_status": "Open",
+                    "resolution_owner": "Unassigned"
+                }
+                issues.append(issue)
+                
+        return pd.DataFrame(issues) if issues else pd.DataFrame()
     
     def print_validation_results(self, results=None):
         """
