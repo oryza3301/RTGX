@@ -20,7 +20,7 @@ from typing import Dict, List, Any, Optional, Union
 from data_loader import DataLoader
 from data_analyzer import DatabaseOverview
 from data_validator import DataGovernance
-from data_lakehouse import save_results_to_lakehouse, publish_to_tables
+from data_lakehouse import save_results_to_lakehouse, publish_results_to_tables
 
 __version__ = "1.0.0"
 
