@@ -403,9 +403,9 @@ class DataGovernance:
                         value_set=cfg["value_set"],
                         mostly=cfg.get("mostly", 1.0)
                     ),
-                    "type": lambda cfg: ExpectColumnValuesToBeOfType(
+                    "Dtype": lambda cfg: ExpectColumnValuesToBeOfType(
                         column=cfg["column"],
-                        type_=cfg["type"]
+                        type_=cfg["type_"]
                     ),
                     "length": lambda cfg: ExpectColumnValueLengthsToBeBetween(
                         column=cfg["column"],
@@ -833,6 +833,103 @@ class DataGovernance:
                 issues.append(issue)
                 
         return pd.DataFrame(issues) if issues else pd.DataFrame()
+    
+    def get_detailed_cell_level_issues(self, project_name, subproject_id):
+        """
+        Generates a detailed, cell-level issue log where each row represents a
+        specific cell that failed one or more validation rules.
+
+        Args:
+            project_name (str): The user-defined name of the project.
+            subproject_id (str): The user-defined name of the subproject.
+
+        Returns:
+            pandas.DataFrame: A DataFrame containing detailed cell-level issues.
+        """
+        all_cell_issues = []
+        execution_timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+        for table_name, result in self.validation_results.items():
+            if not result or not result.get("results"):
+                continue
+
+            df = self.dataframes[table_name].copy()
+            df['original_index'] = df.index
+
+            failed_expectations = [r for r in result["results"] if not r.get("success")]
+
+            for expectation in failed_expectations:
+                config = expectation.get("expectation_config", {})
+                kwargs = config.get("kwargs", {})
+                column = kwargs.get("column")
+                rule_type = config.get("type")
+                result_details = expectation.get("result", {})
+
+                if not column or 'partial_unexpected_list' not in result_details:
+                    continue
+
+                # Get the list of values that failed the expectation
+                failing_values = result_details['partial_unexpected_list']
+
+                # Find all rows in the original dataframe that contain these failing values
+                # This can be slow on large datasets but is necessary for this level of detail
+                failing_rows = df[df[column].isin(failing_values)]
+
+                for index, row in failing_rows.iterrows():
+                    # For each failing row, create a record
+                    cell_issue = {
+                        "project_id": project_name,
+                        "subproject_id": subproject_id,
+                        "table_name": table_name,
+                        "column_name": column,
+                        "row_num": row['original_index'],
+                        "value": row[column],
+                        "timestamp": execution_timestamp
+                    }
+
+                    # Pivot the rule violation into its own column
+                    if rule_type == "expect_column_values_to_not_be_null":
+                        cell_issue["violation_not_null"] = "X"
+                    elif rule_type == "expect_column_values_to_be_of_type":
+                        cell_issue["violation_data_type"] = kwargs.get("type_")
+                    elif rule_type == "expect_column_values_to_be_in_set":
+                        cell_issue["violation_in_set"] = str(kwargs.get("value_set"))
+                    elif rule_type == "expect_column_values_to_match_regex":
+                        cell_issue["violation_regex"] = kwargs.get("regex")
+                    elif rule_type == "expect_column_values_to_be_between":
+                        min_val = kwargs.get("min_value", "N/A")
+                        max_val = kwargs.get("max_value", "N/A")
+                        cell_issue["violation_range"] = f"[{min_val} - {max_val}]"
+
+                    all_cell_issues.append(cell_issue)
+
+        # Consolidate multiple violations for the same cell
+        if not all_cell_issues:
+            return pd.DataFrame()
+
+        final_issues_df = pd.DataFrame(all_cell_issues)
+        
+        # Group by the unique cell and merge the violations
+        # This creates one row per failing cell, with all its violations listed
+        aggregation_functions = {
+            'value': 'first',
+            'violation_not_null': 'first',
+            'violation_data_type': 'first',
+            'violation_in_set': 'first',
+            'violation_regex': 'first',
+            'violation_range': 'first'
+            # Add other violation columns here if you create more rule types
+        }
+
+        # Fill NaN to allow grouping and merging text
+        final_issues_df = final_issues_df.fillna(method='ffill')
+        
+        grouped_df = final_issues_df.groupby([
+            "project_id", "subproject_id", "table_name", 
+            "column_name", "row_num", "timestamp"
+        ]).agg(aggregation_functions).reset_index()
+
+        return grouped_df
     
     def print_validation_results(self, results=None):
         """
