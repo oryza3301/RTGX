@@ -836,8 +836,8 @@ class DataGovernance:
     
     def get_detailed_cell_level_issues(self, project_name, subproject_id):
         """
-        Generates a detailed, cell-level issue log where each row represents a
-        specific cell that failed one or more validation rules.
+        (Final Corrected Version)
+        Generates a detailed, cell-level issue log that is robust for Spark conversion.
         """
         all_cell_issues = []
         execution_timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -858,7 +858,6 @@ class DataGovernance:
                 rule_type = config.get("type")
                 result_details = expectation.get("result", {})
     
-                # Skip if the failure details don't contain a list of unexpected values
                 if not column or 'partial_unexpected_list' not in result_details:
                     continue
                 
@@ -900,19 +899,23 @@ class DataGovernance:
     
         final_issues_df = pd.DataFrame(all_cell_issues)
         
-        # --- THE FIX IS HERE ---
-        # 1. Define all possible violation columns that we can create.
+        # --- THE ROBUST FIX IS HERE ---
+        # 1. Define all possible violation columns.
         all_possible_violation_cols = [
             'violation_not_null', 'violation_data_type', 'violation_in_set',
             'violation_regex', 'violation_range'
         ]
     
-        # 2. Add any of these columns if they are missing from the dataframe.
+        # 2. Add any missing columns.
         for col in all_possible_violation_cols:
             if col not in final_issues_df.columns:
-                final_issues_df[col] = None
+                final_issues_df[col] = None # Start with None is fine
+    
+        # 3. Reorder and fill NA with empty strings BEFORE grouping.
+        # This ensures all columns exist and are of a string-compatible type for Spark.
+        final_issues_df = final_issues_df.fillna('')
         
-        # 3. Define the aggregation functions. This will now work correctly.
+        # 4. Define the aggregation functions.
         aggregation_functions = {
             'value': 'first',
             'violation_not_null': 'first',
