@@ -288,36 +288,44 @@ class DataGovernance:
                 for column in df.columns:
                     # Add a few basic expectations for each column
                     suite.add_expectation(ExpectColumnToExist(column=column))
-                    
-                    # Type-specific expectations
-                    if pd.api.types.is_numeric_dtype(df[column]):
-                        from great_expectations.expectations import ExpectColumnValuesToBeOfType
-                        type_name = "int" if pd.api.types.is_integer_dtype(df[column]) else "float"
-                        suite.add_expectation(
-                            ExpectColumnValuesToBeOfType(column=column, type_=type_name)
-                        )
+                    if pd.api.types.is_string_dtype(df[column]) or pd.api.types.is_integer_dtype(df[column]):
+                        # For strings and integers, fill NA with a temporary placeholder for validation
+                        # This prevents the astype() conversion from failing on mixed types
+                        if df[column].isnull().any():
+                             df[column] = df[column].fillna('')
+
+                    try:
+                        # Type-specific expectations
+                        if pd.api.types.is_numeric_dtype(df[column]):
+                            from great_expectations.expectations import ExpectColumnValuesToBeOfType
+                            type_name = "int" if pd.api.types.is_integer_dtype(df[column]) else "float"
+                            suite.add_expectation(
+                                ExpectColumnValuesToBeOfType(column=column, type_=type_name)
+                            )
+                            
+                            # If there are no nulls, add expectation
+                            if df[column].isna().sum() == 0:
+                                from great_expectations.expectations import ExpectColumnValuesToNotBeNull
+                                suite.add_expectation(ExpectColumnValuesToNotBeNull(column=column))
                         
-                        # If there are no nulls, add expectation
-                        if df[column].isna().sum() == 0:
-                            from great_expectations.expectations import ExpectColumnValuesToNotBeNull
-                            suite.add_expectation(ExpectColumnValuesToNotBeNull(column=column))
-                    
-                    elif pd.api.types.is_string_dtype(df[column]):
-                        from great_expectations.expectations import ExpectColumnValuesToBeOfType
-                        suite.add_expectation(
-                            ExpectColumnValuesToBeOfType(column=column, type_="string")
-                        )
-                        
-                        # If column has few unique values and many rows, it might be categorical
-                        if df[column].nunique() <= 20 and len(df) > 50:
-                            from great_expectations.expectations import ExpectColumnValuesToBeInSet
-                            unique_values = df[column].dropna().unique().tolist()
-                            if len(unique_values) > 0:
-                                suite.add_expectation(
-                                    ExpectColumnValuesToBeInSet(
-                                        column=column, value_set=unique_values, mostly=0.9
-                                    )
+                        elif pd.api.types.is_string_dtype(df[column]):
+                            from great_expectations.expectations import ExpectColumnValuesToBeOfType
+                            suite.add_expectation(
+                                ExpectColumnValuesToBeOfType(column=column, type_="string")
+                            )
+                            
+                            # If column has few unique values and many rows, it might be categorical
+                            if df[column].nunique() <= 20 and len(df) > 50:
+                                from great_expectations.expectations import ExpectColumnValuesToBeInSet
+                                unique_values = df[column].dropna().unique().tolist()
+                                if len(unique_values) > 0:
+                                    suite.add_expectation(
+                                        ExpectColumnValuesToBeInSet(
+                                            column=column, value_set=unique_values, mostly=0.9
+                                        )
                                 )
+                        except Exception as e:
+                            print(f"⚠️ Could not add type expectation for column '{column}'. Reason: {e}")
             except Exception as e:
                 print(f"Warning: Error adding expectations for {table_name}: {str(e)}")
                 print("Will continue with limited validation capabilities")
