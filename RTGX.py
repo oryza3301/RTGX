@@ -22,6 +22,13 @@ from data_analyzer import DatabaseOverview
 from data_validator import DataGovernance
 from data_lakehouse import save_results_to_lakehouse, publish_results_to_tables
 
+from pyspark.sql.types import (
+    StringType, IntegerType, LongType, FloatType, DoubleType,
+    BooleanType, DateType, TimestampType, ShortType, ByteType, DecimalType
+)
+from pyspark.sql import DataFrame
+spark.conf.set("spark.sql.execution.arrow.pyspark.enabled", "true")
+
 __version__ = "1.0.0"
 
 # Simplified API for common operations
@@ -198,3 +205,59 @@ def export_rules_summary(validator, output_path="rules_summary.xlsx"):
         Path to the saved Excel file
     """
     return validator.export_rules_summary(output_path)
+
+def to_pandas(spark_df: DataFrame, table_name: str):
+    # Use toPandas() directly for the initial conversion
+    pandas_df = spark_df.toPandas()
+    # Get the original schema from Spark to use as the source of truth
+    spark_schema = spark_df.schema
+    # Define a mapping from Spark types to modern, nullable Pandas dtypes
+    type_mapping = {
+        StringType: "string",
+        IntegerType: "Int32",
+        LongType: "Int64",
+        ShortType: "Int16",
+        ByteType: "Int8",
+        DoubleType: "float64",
+        FloatType: "float32",
+        BooleanType: "boolean",
+        DateType: "datetime64[ns]",
+        TimestampType: "datetime64[ns]",
+        DecimalType: "float64"  # Convert Decimal to float for compatibility
+    }
+ 
+    # Loop through each column defined in the Spark schema and apply the correct type
+    for field in spark_schema:
+        col_name = field.name
+        spark_type = type(field.dataType)
+        target_pandas_type = type_mapping.get(spark_type)
+ 
+        if target_pandas_type:
+            try:
+                # Only change the type if it's not already correct
+                if str(pandas_df[col_name].dtype) != target_pandas_type:
+                    pandas_df[col_name] = pandas_df[col_name].astype(target_pandas_type)
+            except (ValueError, TypeError):
+                # If conversion fails (e.g., trying to make a string 'abc' an integer),
+                # just skip it and let it be logged in the verification step.
+                pass
+ 
+    # --- Verification Step ---
+    mismatched_columns = []
+    for col in pandas_df.columns:
+        spark_col_type_str = str(spark_schema[col].dataType)
+        pandas_col_type_str = str(pandas_df[col].dtype)
+        # Check if the final type matches the intended mapping
+        spark_type = type(spark_schema[col].dataType)
+        target_type = type_mapping.get(spark_type)
+        # Log if there is a mismatch
+        if target_type and pandas_col_type_str != target_type:
+             mismatched_columns.append({
+                "table_name": table_name,
+                "column": col,
+                "spark_data_type": spark_col_type_str,
+                "pandas_data_type": pandas_col_type_str
+            })
+ 
+    verification_df = pd.DataFrame(mismatched_columns)
+    return pandas_df, verification_df
