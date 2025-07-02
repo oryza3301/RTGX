@@ -27,7 +27,6 @@ from pyspark.sql.types import (
     BooleanType, DateType, TimestampType, ShortType, ByteType, DecimalType
 )
 from pyspark.sql import DataFrame
-spark.conf.set("spark.sql.execution.arrow.pyspark.enabled", "true")
 
 __version__ = "1.0.0"
 
