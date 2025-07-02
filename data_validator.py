@@ -218,11 +218,8 @@ class DataGovernance:
 
     def add_base_validations(self, table_name, primary_key=None):
         """
-        Add standard validations for a table
-        
-        Args:
-            table_name: Name of the table
-            primary_key: Primary key definition (string, list, or composite string like 'col1' + 'col2')
+        Adds standard validations for a table, with robust data type checks
+        and primary key validation.
         """
         if table_name not in self.expectation_suites:
             raise ValueError(f"Table {table_name} not registered")
@@ -234,101 +231,63 @@ class DataGovernance:
         suite = self.expectation_suites[table_name]
         df = self.dataframes[table_name]
         
-        # Parse and validate primary key
+        # --- Primary Key Logic (from original code) ---
         pk_columns = self._parse_primary_key(primary_key)
         pk_is_valid = False
         
         if pk_columns:
             pk_is_valid = self._validate_primary_key_candidate(table_name, pk_columns)
         
-        # Table expectations - columns exist
         if hasattr(suite, "add_expectation"):
-            try:
-                # Modern GE API
-                from great_expectations.expectations import ExpectTableColumnsToMatchOrderedList
-                suite.add_expectation(
-                    ExpectTableColumnsToMatchOrderedList(column_list=list(df.columns))
-                )
+            from great_expectations.expectations import (
+                ExpectTableColumnsToMatchOrderedList, ExpectColumnToExist,
+                ExpectColumnValuesToBeUnique, ExpectColumnValuesToNotBeNull,
+                ExpectCompoundColumnsToBeUnique, ExpectColumnValuesToBeOfType
+            )
+            
+            suite.add_expectation(
+                ExpectTableColumnsToMatchOrderedList(column_list=list(df.columns))
+            )
+            
+            if pk_columns and pk_is_valid:
+                for col in pk_columns:
+                    if col in df.columns:
+                        suite.add_expectation(ExpectColumnToExist(column=col))
+                        suite.add_expectation(ExpectColumnValuesToNotBeNull(column=col))
                 
-                # Primary key expectations (only if validation passed)
-                if pk_columns and pk_is_valid:
-                    from great_expectations.expectations import (
-                        ExpectColumnToExist,
-                        ExpectColumnValuesToBeUnique,
-                        ExpectColumnValuesToNotBeNull
-                    )
-                    
-                    # Add expectations for each column in the primary key
-                    for col in pk_columns:
-                        if col in df.columns:
-                            suite.add_expectation(ExpectColumnToExist(column=col))
-                            suite.add_expectation(ExpectColumnValuesToNotBeNull(column=col))
-                    
-                    # Add composite uniqueness expectation if multiple columns
-                    if len(pk_columns) > 1:
-                        from great_expectations.expectations import ExpectCompoundColumnsToBeUnique
-                        try:
-                            suite.add_expectation(
-                                ExpectCompoundColumnsToBeUnique(column_list=pk_columns)
-                            )
-                        except:
-                            # Fallback: Add individual uniqueness expectations
-                            print(f"Note: Using individual column uniqueness checks for composite key in {table_name}")
-                            for col in pk_columns:
-                                if col in df.columns:
-                                    suite.add_expectation(ExpectColumnValuesToBeUnique(column=col))
-                    else:
-                        # Single column primary key
-                        if pk_columns[0] in df.columns:
-                            suite.add_expectation(ExpectColumnValuesToBeUnique(column=pk_columns[0]))
-                elif pk_columns and not pk_is_valid:
-                    print(f"Skipping primary key expectations for {table_name} due to validation failures")
+                if len(pk_columns) > 1:
+                    suite.add_expectation(ExpectCompoundColumnsToBeUnique(column_list=pk_columns))
+                else:
+                    suite.add_expectation(ExpectColumnValuesToBeUnique(column=pk_columns[0]))
+            elif pk_columns and not pk_is_valid:
+                print(f"Skipping primary key expectations for {table_name} due to validation failures")
+            
+            # --- Corrected Data Type Validation Logic ---
+            for column in df.columns:
+                suite.add_expectation(ExpectColumnToExist(column=column))
                 
-                # Data type expectations for all columns
-                for column in df.columns:
-                    # Add a few basic expectations for each column
-                    suite.add_expectation(ExpectColumnToExist(column=column))
-                    if pd.api.types.is_string_dtype(df[column]) or pd.api.types.is_integer_dtype(df[column]):
-                        # For strings and integers, fill NA with a temporary placeholder for validation
-                        # This prevents the astype() conversion from failing on mixed types
-                        if df[column].isnull().any():
-                             df[column] = df[column].fillna('')
-
-                    try:
-                        # Type-specific expectations
-                        if pd.api.types.is_numeric_dtype(df[column]):
-                            from great_expectations.expectations import ExpectColumnValuesToBeOfType
-                            type_name = "int" if pd.api.types.is_integer_dtype(df[column]) else "float"
-                            suite.add_expectation(
-                                ExpectColumnValuesToBeOfType(column=column, type_=type_name)
-                            )
-                            
-                            # If there are no nulls, add expectation
-                            if df[column].isna().sum() == 0:
-                                from great_expectations.expectations import ExpectColumnValuesToNotBeNull
-                                suite.add_expectation(ExpectColumnValuesToNotBeNull(column=column))
-                        
-                        elif pd.api.types.is_string_dtype(df[column]):
-                            from great_expectations.expectations import ExpectColumnValuesToBeOfType
-                            suite.add_expectation(
-                                ExpectColumnValuesToBeOfType(column=column, type_="string")
-                            )
-                            
-                            # If column has few unique values and many rows, it might be categorical
-                            if df[column].nunique() <= 20 and len(df) > 50:
-                                from great_expectations.expectations import ExpectColumnValuesToBeInSet
-                                unique_values = df[column].dropna().unique().tolist()
-                                if len(unique_values) > 0:
-                                    suite.add_expectation(
-                                        ExpectColumnValuesToBeInSet(
-                                            column=column, value_set=unique_values, mostly=0.9
-                                        )
-                                )
-                        except Exception as e:
-                            print(f"⚠️ Could not add type expectation for column '{column}'. Reason: {e}")
-            except Exception as e:
-                print(f"Warning: Error adding expectations for {table_name}: {str(e)}")
-                print("Will continue with limited validation capabilities")
+                try:
+                    # Use .infer_objects() to get a better initial type inference
+                    inferred_type = pd.api.types.infer_dtype(df[column], skipna=True)
+    
+                    if inferred_type in ['string', 'object', 'mixed']:
+                        # For any column that is or might be text, validate as string.
+                        # This is safe and prevents errors with mixed-type object columns.
+                        suite.add_expectation(
+                            ExpectColumnValuesToBeOfType(column=column, type_="string")
+                        )
+                    elif inferred_type in ['integer']:
+                        suite.add_expectation(
+                            ExpectColumnValuesToBeOfType(column=column, type_="int")
+                        )
+                    elif inferred_type in ['floating', 'decimal']:
+                        suite.add_expectation(
+                            ExpectColumnValuesToBeOfType(column=column, type_="float")
+                        )
+                    # Other types like 'datetime' can be added here if needed
+    
+                except Exception as e:
+                    print(f"⚠️ Could not add type expectation for column '{column}'. Reason: {e}")
         else:
             print(f"Warning: Expectation suite for {table_name} lacks add_expectation method")
     
@@ -844,8 +803,9 @@ class DataGovernance:
     
     def get_detailed_cell_level_issues(self, project_name, subproject_id):
         """
-        (Final Corrected Version)
-        Generates a detailed, cell-level issue log that is robust for Spark conversion.
+        Generates a detailed, cell-level issue log where each row represents a
+        specific cell that failed one or more validation rules. Handles all defined
+        rule types and will not crash on missing violation types.
         """
         all_cell_issues = []
         execution_timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -866,14 +826,19 @@ class DataGovernance:
                 rule_type = config.get("type")
                 result_details = expectation.get("result", {})
     
+                # Skip if the failure details don't contain a list of unexpected values
                 if not column or 'partial_unexpected_list' not in result_details:
                     continue
                 
                 failing_values = result_details['partial_unexpected_list']
-                if not failing_values:
+                if failing_values is None or len(failing_values) == 0:
                     continue
     
-                failing_rows = df[df[column].isin(failing_values)]
+                # Handle cases where failing values might include None/NaN which requires special handling
+                if any(pd.isna(v) for v in failing_values):
+                    failing_rows = df[df[column].isin(failing_values) | df[column].isnull()]
+                else:
+                    failing_rows = df[df[column].isin(failing_values)]
     
                 for index, row in failing_rows.iterrows():
                     cell_issue = {
@@ -886,19 +851,21 @@ class DataGovernance:
                         "timestamp": execution_timestamp
                     }
     
-                    # Pivot the rule violation into its own column
+                    # --- Expanded logic to handle all your rule types ---
                     if rule_type == "expect_column_values_to_not_be_null":
                         cell_issue["violation_not_null"] = "X"
                     elif rule_type == "expect_column_values_to_be_of_type":
                         cell_issue["violation_data_type"] = kwargs.get("type_")
                     elif rule_type == "expect_column_values_to_be_in_set":
-                        cell_issue["violation_in_set"] = str(kwargs.get("value_set"))
+                        cell_issue["violation_in_set"] = str(kwargs.get("value_set", "[]"))
                     elif rule_type == "expect_column_values_to_match_regex":
-                        cell_issue["violation_regex"] = kwargs.get("regex")
+                        cell_issue["violation_regex"] = kwargs.get("regex", "")
                     elif rule_type == "expect_column_values_to_be_between":
                         min_val = kwargs.get("min_value", "N/A")
                         max_val = kwargs.get("max_value", "N/A")
-                        cell_issue["violation_range"] = f"[{min_val} - {max_val}]"
+                        cell_issue["violation_range"] = f"Not in [{min_val} - {max_val}]"
+                    elif rule_type == "expect_column_values_to_be_unique":
+                        cell_issue["violation_unique"] = "Not Unique"
                     
                     all_cell_issues.append(cell_issue)
     
@@ -907,33 +874,28 @@ class DataGovernance:
     
         final_issues_df = pd.DataFrame(all_cell_issues)
         
-        # --- THE ROBUST FIX IS HERE ---
-        # 1. Define all possible violation columns.
+        # Define ALL possible violation columns that we can create
         all_possible_violation_cols = [
             'violation_not_null', 'violation_data_type', 'violation_in_set',
-            'violation_regex', 'violation_range'
+            'violation_regex', 'violation_range', 'violation_unique'
         ]
     
-        # 2. Add any missing columns.
+        # Add any missing violation columns to the dataframe before aggregation
         for col in all_possible_violation_cols:
             if col not in final_issues_df.columns:
-                final_issues_df[col] = None # Start with None is fine
-    
-        # 3. Reorder and fill NA with empty strings BEFORE grouping.
-        # This ensures all columns exist and are of a string-compatible type for Spark.
-        final_issues_df = final_issues_df.fillna('')
+                final_issues_df[col] = None
         
-        # 4. Define the aggregation functions.
         aggregation_functions = {
             'value': 'first',
             'violation_not_null': 'first',
             'violation_data_type': 'first',
             'violation_in_set': 'first',
             'violation_regex': 'first',
-            'violation_range': 'first'
+            'violation_range': 'first',
+            'violation_unique': 'first'
         }
         
-        # Group by the unique cell and merge the violations
+        # Group by the unique cell to consolidate all its violations into one row
         grouped_df = final_issues_df.groupby([
             "project_id", "subproject_id", "table_name", 
             "column_name", "row_num", "timestamp"
