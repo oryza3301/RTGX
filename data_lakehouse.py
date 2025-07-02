@@ -78,18 +78,20 @@ def save_results_to_lakehouse(validator, project_name, subproject_id, spark_sess
 
 def publish_results_to_tables(project_name, subproject_id, timestamp, spark_session, lakehouse_path, target_database):
     """
-    Publishes (appends) data from a specific run to the final Delta tables,
-    now including the new detailed_issues table.
+    Publishes data from a specific run to the final Delta tables.
+    - Appends to Project_Summary, Detailed_Rules, and Issues_Outliers.
+    - OVERWRITES the Detailed_Issues table for a fresh snapshot every time.
     """
     project_name_safe = re.sub(r'[^a-zA-Z0-9_]', '_', project_name)
     subproject_id_safe = re.sub(r'[^a-zA-Z0-9_]', '_', subproject_id)
     source_path_base = f"{lakehouse_path}/{project_name_safe}/{subproject_id_safe}/{timestamp}"
     
+    # Define source paths and target tables
     publication_map = {
         "project_summary": "Project_Summary",
         "detailed_rules": "Detailed_Rules",
         "issues_outliers": "Issues_Outliers",
-        "detailed_issues": "Detailed_Issues" # New table
+        "detailed_issues": "Detailed_Issues"
     }
 
     print(f"📅 Publishing results for '{project_name} - {subproject_id}' from timestamp: {timestamp}")
@@ -100,15 +102,26 @@ def publish_results_to_tables(project_name, subproject_id, timestamp, spark_sess
         
         try:
             print(f"📖 Reading from path: {source_parquet_path}")
-            df_to_append = spark_session.read.format("parquet").load(source_parquet_path)
+            df_to_publish = spark_session.read.format("parquet").load(source_parquet_path)
 
-            if df_to_append.rdd.isEmpty():
+            if df_to_publish.rdd.isEmpty():
                 print(f"⚠️ No data found at {source_parquet_path}. Skipping table '{full_table_name}'.")
                 continue
 
-            print(f"💾 Appending {df_to_append.count()} rows to table: {full_table_name}")
-            df_to_append.write.format("delta").mode("append").option("mergeSchema", "true").saveAsTable(full_table_name)
-            print(f"✅ Successfully appended to table: {full_table_name}")
+            # --- THE CORE LOGIC CHANGE IS HERE ---
+            if target_table_name == "Detailed_Issues":
+                # For the detailed issues table, always overwrite
+                write_mode = "overwrite"
+                print(f"💾 OVERWRITING {df_to_publish.count()} rows in table: {full_table_name}")
+            else:
+                # For all other tables, append to maintain history
+                write_mode = "append"
+                print(f"💾 Appending {df_to_publish.count()} rows to table: {full_table_name}")
+            
+            # Write to the delta table with the determined mode
+            df_to_publish.write.format("delta").mode(write_mode).option("mergeSchema", "true").saveAsTable(full_table_name)
+            
+            print(f"✅ Successfully published to table: {full_table_name} (Mode: {write_mode})")
 
         except Exception as e:
             if "Path does not exist" in str(e):
