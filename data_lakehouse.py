@@ -7,6 +7,8 @@ Functions for saving and publishing data quality results to lakehouse.
 import re
 from datetime import datetime
 import pandas as pd
+from pyspark.sql.types import StructType, StructField, StringType, LongType, DoubleType
+
 
 def save_results_to_lakehouse(validator, project_name, subproject_id, spark_session, lakehouse_path):
     """
