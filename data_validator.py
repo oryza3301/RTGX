@@ -236,14 +236,16 @@ class DataGovernance:
         return summary_df                            
     def add_base_validations(self, table_name, primary_key=None):
         """
-        Adds standard validations with a robust, definitive fix for data type validation.
+        (Final, Robust Version)
+        Adds standard validations, including a permanent fix for data type validation
+        that correctly handles string, integer, and float columns.
         """
         if table_name not in self.expectation_suites:
             raise ValueError(f"Table {table_name} not registered")
     
         suite = self.expectation_suites.get(table_name)
         if suite is None:
-            print(f"Warning: Cannot add validations for {table_name} - expectation suite not available.")
+            print(f"Warning: Cannot add validations for {table_name} - suite not available.")
             return
     
         df = self.dataframes[table_name]
@@ -253,6 +255,7 @@ class DataGovernance:
             ExpectCompoundColumnsToBeUnique, ExpectColumnValuesToBeOfType
         )
     
+        # Primary Key validation logic
         pk_columns = self._parse_primary_key(primary_key)
         if pk_columns and self._validate_primary_key_candidate(table_name, pk_columns):
             for col in pk_columns:
@@ -263,6 +266,7 @@ class DataGovernance:
             else:
                 suite.add_expectation(ExpectColumnValuesToBeUnique(column=pk_columns[0]))
     
+        # Definitive Data Type Validation Logic
         for column in df.columns:
             suite.add_expectation(ExpectColumnToExist(column=column))
     
@@ -270,58 +274,19 @@ class DataGovernance:
             if temp_series.empty:
                 continue
     
-            try:
-                numeric_series = pd.to_numeric(temp_series, errors='coerce')
-                if numeric_series.isna().sum() > 0:
-                    suite.add_expectation(ExpectColumnValuesToBeOfType(column=column, type_="string"))
-                else:
-                    if (numeric_series == numeric_series.astype(int)).all():
-                        suite.add_expectation(ExpectColumnValuesToBeOfType(column=column, type_="int"))
-                    else:
-                        suite.add_expectation(ExpectColumnValuesToBeOfType(column=column, type_="float"))
-            except (ValueError, TypeError):
-                suite.add_expectation(ExpectColumnValuesToBeOfType(column=column, type_="string"))
-    
-        # --- Definitive Data Type Validation Fix ---
-        from great_expectations.expectations import ExpectColumnValuesToBeOfType, ExpectColumnToExist
-    
-        for column in df.columns:
-            suite.add_expectation(ExpectColumnToExist(column=column))
-            
-            # We make a copy of the column to perform tests without altering the original dataframe
-            temp_series = df[column].dropna()
-    
-            # If the column is empty after dropping nulls, we can't infer a type, so we skip it.
-            if temp_series.empty:
-                print(f"Note: Skipping type validation for column '{column}' as it contains only null values.")
-                continue
-    
-            # Try to convert to numeric. This is the most reliable test.
+            # Attempt to convert the series to a numeric type
             numeric_series = pd.to_numeric(temp_series, errors='coerce')
-            
-            # Check if the conversion to numeric was successful for all non-null values
-            if not numeric_series.isnull().any():
-                # It's a numeric type. Now, check if it can be an integer.
-                # We check if all values are equal to their integer-converted counterparts.
-                if (numeric_series == numeric_series.astype(int)).all():
-                    # All values are whole numbers, so we validate as an Integer.
-                    print(f"INFO: Validating column '{column}' as Integer.")
-                    suite.add_expectation(
-                        ExpectColumnValuesToBeOfType(column=column, type_="int")
-                    )
-                else:
-                    # It contains decimals, so we validate as a Float.
-                    print(f"INFO: Validating column '{column}' as Float.")
-                    suite.add_expectation(
-                        ExpectColumnValuesToBeOfType(column=column, type_="float")
-                    )
+    
+            # If more than half the values failed to convert to numeric, it's a string
+            if numeric_series.isna().sum() > (len(temp_series) / 2):
+                suite.add_expectation(ExpectColumnValuesToBeOfType(column=column, type_="string"))
             else:
-                # The conversion to numeric failed, so it must be a String.
-                # This is the catch-all for any non-numeric data.
-                print(f"INFO: Validating column '{column}' as String.")
-                suite.add_expectation(
-                    ExpectColumnValuesToBeOfType(column=column, type_="string")
-                )
+                # It's a numeric column. Now check if it's integer or float.
+                # An integer column will have no difference when compared to its rounded version.
+                if (numeric_series == round(numeric_series, 0)).all():
+                    suite.add_expectation(ExpectColumnValuesToBeOfType(column=column, type_="int"))
+                else:
+                    suite.add_expectation(ExpectColumnValuesToBeOfType(column=column, type_="float"))
     
     def add_rule(self, table_name, expectation):
         """
