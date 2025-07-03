@@ -215,26 +215,46 @@ class DataGovernance:
             print(f"⚠️  Primary key validation failed for {table_name}: ({pk_display})")
             print(f"   Found {duplicate_count} duplicate combinations out of {total_count} total rows")
             return False
-
+    def calculate_quality_score(summary_df, detailed_issues_df):
+        """
+        Recalculates the Quality Score based on cell-level errors.
+        """
+        if detailed_issues_df.empty:
+            summary_df['quality_score'] = 100.0
+            return summary_df
+    
+        total_cells = summary_df['row_count'].sum() * len(summary_df.columns)
+        total_failing_cells = len(detailed_issues_df)
+    
+        if total_cells == 0:
+            quality_score = 0.0
+        else:
+            quality_score = ((total_cells - total_failing_cells) / total_cells) * 100
+            quality_score = max(0, quality_score) # Ensure score is not negative
+    
+        summary_df['quality_score'] = quality_score
+        return summary_df                            
     def add_base_validations(self, table_name, primary_key=None):
         """
-        Adds standard validations, including a permanent fix for data type validation
-        that correctly handles string, integer, and float columns.
+        Adds standard validations with a robust, definitive fix for data type validation.
         """
         if table_name not in self.expectation_suites:
             raise ValueError(f"Table {table_name} not registered")
-        
+    
         suite = self.expectation_suites.get(table_name)
         if suite is None:
             print(f"Warning: Cannot add validations for {table_name} - expectation suite not available.")
             return
     
         df = self.dataframes[table_name]
-        
-        # --- Primary Key Logic (No changes needed here) ---
+    
+        from great_expectations.expectations import (
+            ExpectColumnToExist, ExpectColumnValuesToBeUnique, ExpectColumnValuesToNotBeNull,
+            ExpectCompoundColumnsToBeUnique, ExpectColumnValuesToBeOfType
+        )
+    
         pk_columns = self._parse_primary_key(primary_key)
         if pk_columns and self._validate_primary_key_candidate(table_name, pk_columns):
-            from great_expectations.expectations import ExpectColumnToExist, ExpectColumnValuesToNotBeNull, ExpectCompoundColumnsToBeUnique, ExpectColumnValuesToBeUnique
             for col in pk_columns:
                 suite.add_expectation(ExpectColumnToExist(column=col))
                 suite.add_expectation(ExpectColumnValuesToNotBeNull(column=col))
@@ -242,6 +262,25 @@ class DataGovernance:
                 suite.add_expectation(ExpectCompoundColumnsToBeUnique(column_list=pk_columns))
             else:
                 suite.add_expectation(ExpectColumnValuesToBeUnique(column=pk_columns[0]))
+    
+        for column in df.columns:
+            suite.add_expectation(ExpectColumnToExist(column=column))
+    
+            temp_series = df[column].dropna()
+            if temp_series.empty:
+                continue
+    
+            try:
+                numeric_series = pd.to_numeric(temp_series, errors='coerce')
+                if numeric_series.isna().sum() > 0:
+                    suite.add_expectation(ExpectColumnValuesToBeOfType(column=column, type_="string"))
+                else:
+                    if (numeric_series == numeric_series.astype(int)).all():
+                        suite.add_expectation(ExpectColumnValuesToBeOfType(column=column, type_="int"))
+                    else:
+                        suite.add_expectation(ExpectColumnValuesToBeOfType(column=column, type_="float"))
+            except (ValueError, TypeError):
+                suite.add_expectation(ExpectColumnValuesToBeOfType(column=column, type_="string"))
     
         # --- Definitive Data Type Validation Fix ---
         from great_expectations.expectations import ExpectColumnValuesToBeOfType, ExpectColumnToExist
