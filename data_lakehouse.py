@@ -8,47 +8,62 @@ import re
 from datetime import datetime
 import pandas as pd
 from pyspark.sql.types import StructType, StructField, StringType, LongType
-from data_validator import calculate_quality_score
+
+def _calculate_quality_score(summary_df, detailed_issues_df):
+    """
+    Internal function to calculate the Quality Score based on cell-level errors.
+    """
+    if detailed_issues_df.empty:
+        summary_df['quality_score'] = 100.0
+        return summary_df
+
+    # Calculate total cells from the summary dataframe
+    total_cells = summary_df['row_count'].sum() * len(summary_df.columns)
+    total_failing_cells = len(detailed_issues_df['row_num'].unique())
+
+    if total_cells == 0:
+        quality_score = 0.0
+    else:
+        # Score is based on the percentage of non-failing cells
+        quality_score = ((total_cells - total_failing_cells) / total_cells) * 100
+        quality_score = max(0, quality_score) # Ensure score is not negative
+
+    summary_df['quality_score'] = quality_score
+    return summary_df
 
 def save_results_to_lakehouse(validator, project_name, subproject_id, spark_session, lakehouse_path):
     """
-    Saves validation results, including the recalculated cell-level Quality Score.
+    Saves all validation results to a timestamped folder in the lakehouse.
     """
-    if not project_name or not subproject_id:
-        raise ValueError("Project name and subproject ID must be non-empty strings")
-
     project_name_safe = re.sub(r'[^a-zA-Z0-9_]', '_', project_name)
     subproject_id_safe = re.sub(r'[^a-zA-Z0-9_]', '_', subproject_id)
     timestamp_folder = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = f"{lakehouse_path}/{project_name_safe}/{subproject_id_safe}/{timestamp_folder}"
 
-    # Generate all dataframes first
-    summary_data = validator.get_summary_stats(project_name, subproject_id)
-    summary_df = pd.DataFrame(summary_data)
+    # Generate all dataframes from the validator
+    summary_df = pd.DataFrame(validator.get_summary_stats(project_name, subproject_id))
     detailed_rules_df = validator.get_detailed_results(project_name, subproject_id)
     issues_outliers_df = validator.get_issues_and_outliers(project_name, subproject_id)
     detailed_issues_df = validator.get_detailed_cell_level_issues(project_name, subproject_id)
 
-    # Recalculate Quality Score using the new function
-    summary_df = calculate_quality_score(summary_df, detailed_issues_df)
-
-    saved_paths = {"timestamp": timestamp_folder, "project_name": project_name, "subproject_id": subproject_id, "base_path": output_path}
+    # Recalculate the Quality Score using the local function
+    summary_df = _calculate_quality_score(summary_df, detailed_issues_df)
 
     try:
-        # Save updated Project Summary
         if not summary_df.empty:
             spark_session.createDataFrame(summary_df).write.format("parquet").mode("overwrite").save(f"{output_path}/project_summary")
             print(f"✅ Saved Project Summary to {output_path}/project_summary")
 
-        # Save other tables
         if not detailed_rules_df.empty:
             spark_session.createDataFrame(detailed_rules_df).write.format("parquet").mode("overwrite").save(f"{output_path}/detailed_rules")
             print(f"✅ Saved Detailed Rules to {output_path}/detailed_rules")
+
         if not issues_outliers_df.empty:
             spark_session.createDataFrame(issues_outliers_df).write.format("parquet").mode("overwrite").save(f"{output_path}/issues_outliers")
             print(f"✅ Saved Issues & Outliers to {output_path}/issues_outliers")
-            
+
         if not detailed_issues_df.empty:
+            # Schema definition to prevent Parquet write errors
             detailed_issues_schema = StructType([
                 StructField("project_id", StringType(), True), StructField("subproject_id", StringType(), True),
                 StructField("table_name", StringType(), True), StructField("column_name", StringType(), True),
@@ -58,9 +73,11 @@ def save_results_to_lakehouse(validator, project_name, subproject_id, spark_sess
                 StructField("violation_regex", StringType(), True), StructField("violation_range", StringType(), True),
                 StructField("violation_unique", StringType(), True)
             ])
+            # Convert all columns (except row_num) to string to ensure safe writing
             for col in detailed_issues_df.columns:
-                 if col != 'row_num':
+                if col != 'row_num':
                     detailed_issues_df[col] = detailed_issues_df[col].astype(str).replace('nan', None)
+
             detailed_issues_spark_df = spark_session.createDataFrame(detailed_issues_df, schema=detailed_issues_schema)
             detailed_issues_spark_df.write.format("parquet").mode("overwrite").save(f"{output_path}/detailed_issues")
             print(f"✅ Saved Detailed Issues to {output_path}/detailed_issues")
@@ -68,9 +85,10 @@ def save_results_to_lakehouse(validator, project_name, subproject_id, spark_sess
     except Exception as e:
         print(f"❌ Error saving results to lakehouse: {str(e)}")
         raise
-    
-    return saved_paths
+        
+    return {"timestamp": timestamp_folder}
 
+# Keep the other functions (publish_results_to_tables, etc.) as they were.
 
 def publish_results_to_tables(project_name, subproject_id, timestamp, spark_session, lakehouse_path, target_database):
     """
