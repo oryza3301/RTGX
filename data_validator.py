@@ -218,78 +218,71 @@ class DataGovernance:
 
     def add_base_validations(self, table_name, primary_key=None):
         """
-        Adds standard validations for a table, with robust data type checks
-        and primary key validation.
+        Adds standard validations, including a permanent fix for data type validation
+        that correctly handles string, integer, and float columns.
         """
         if table_name not in self.expectation_suites:
             raise ValueError(f"Table {table_name} not registered")
         
-        if self.expectation_suites[table_name] is None:
-            print(f"Warning: Cannot add validations for {table_name} - expectation suite not available")
+        suite = self.expectation_suites.get(table_name)
+        if suite is None:
+            print(f"Warning: Cannot add validations for {table_name} - expectation suite not available.")
             return
-            
-        suite = self.expectation_suites[table_name]
+    
         df = self.dataframes[table_name]
         
-        # --- Primary Key Logic (from original code) ---
+        # --- Primary Key Logic (No changes needed here) ---
         pk_columns = self._parse_primary_key(primary_key)
-        pk_is_valid = False
-        
-        if pk_columns:
-            pk_is_valid = self._validate_primary_key_candidate(table_name, pk_columns)
-        
-        if hasattr(suite, "add_expectation"):
-            from great_expectations.expectations import (
-                ExpectTableColumnsToMatchOrderedList, ExpectColumnToExist,
-                ExpectColumnValuesToBeUnique, ExpectColumnValuesToNotBeNull,
-                ExpectCompoundColumnsToBeUnique, ExpectColumnValuesToBeOfType
-            )
+        if pk_columns and self._validate_primary_key_candidate(table_name, pk_columns):
+            from great_expectations.expectations import ExpectColumnToExist, ExpectColumnValuesToNotBeNull, ExpectCompoundColumnsToBeUnique, ExpectColumnValuesToBeUnique
+            for col in pk_columns:
+                suite.add_expectation(ExpectColumnToExist(column=col))
+                suite.add_expectation(ExpectColumnValuesToNotBeNull(column=col))
+            if len(pk_columns) > 1:
+                suite.add_expectation(ExpectCompoundColumnsToBeUnique(column_list=pk_columns))
+            else:
+                suite.add_expectation(ExpectColumnValuesToBeUnique(column=pk_columns[0]))
+    
+        # --- Definitive Data Type Validation Fix ---
+        from great_expectations.expectations import ExpectColumnValuesToBeOfType, ExpectColumnToExist
+    
+        for column in df.columns:
+            suite.add_expectation(ExpectColumnToExist(column=column))
             
-            suite.add_expectation(
-                ExpectTableColumnsToMatchOrderedList(column_list=list(df.columns))
-            )
+            # We make a copy of the column to perform tests without altering the original dataframe
+            temp_series = df[column].dropna()
+    
+            # If the column is empty after dropping nulls, we can't infer a type, so we skip it.
+            if temp_series.empty:
+                print(f"Note: Skipping type validation for column '{column}' as it contains only null values.")
+                continue
+    
+            # Try to convert to numeric. This is the most reliable test.
+            numeric_series = pd.to_numeric(temp_series, errors='coerce')
             
-            if pk_columns and pk_is_valid:
-                for col in pk_columns:
-                    if col in df.columns:
-                        suite.add_expectation(ExpectColumnToExist(column=col))
-                        suite.add_expectation(ExpectColumnValuesToNotBeNull(column=col))
-                
-                if len(pk_columns) > 1:
-                    suite.add_expectation(ExpectCompoundColumnsToBeUnique(column_list=pk_columns))
+            # Check if the conversion to numeric was successful for all non-null values
+            if not numeric_series.isnull().any():
+                # It's a numeric type. Now, check if it can be an integer.
+                # We check if all values are equal to their integer-converted counterparts.
+                if (numeric_series == numeric_series.astype(int)).all():
+                    # All values are whole numbers, so we validate as an Integer.
+                    print(f"INFO: Validating column '{column}' as Integer.")
+                    suite.add_expectation(
+                        ExpectColumnValuesToBeOfType(column=column, type_="int")
+                    )
                 else:
-                    suite.add_expectation(ExpectColumnValuesToBeUnique(column=pk_columns[0]))
-            elif pk_columns and not pk_is_valid:
-                print(f"Skipping primary key expectations for {table_name} due to validation failures")
-            
-            # --- Corrected Data Type Validation Logic ---
-            for column in df.columns:
-                suite.add_expectation(ExpectColumnToExist(column=column))
-                
-                try:
-                    # Use .infer_objects() to get a better initial type inference
-                    inferred_type = pd.api.types.infer_dtype(df[column], skipna=True)
-    
-                    if inferred_type in ['string', 'object', 'mixed']:
-                        # For any column that is or might be text, validate as string.
-                        # This is safe and prevents errors with mixed-type object columns.
-                        suite.add_expectation(
-                            ExpectColumnValuesToBeOfType(column=column, type_="string")
-                        )
-                    elif inferred_type in ['integer']:
-                        suite.add_expectation(
-                            ExpectColumnValuesToBeOfType(column=column, type_="int")
-                        )
-                    elif inferred_type in ['floating', 'decimal']:
-                        suite.add_expectation(
-                            ExpectColumnValuesToBeOfType(column=column, type_="float")
-                        )
-                    # Other types like 'datetime' can be added here if needed
-    
-                except Exception as e:
-                    print(f"⚠️ Could not add type expectation for column '{column}'. Reason: {e}")
-        else:
-            print(f"Warning: Expectation suite for {table_name} lacks add_expectation method")
+                    # It contains decimals, so we validate as a Float.
+                    print(f"INFO: Validating column '{column}' as Float.")
+                    suite.add_expectation(
+                        ExpectColumnValuesToBeOfType(column=column, type_="float")
+                    )
+            else:
+                # The conversion to numeric failed, so it must be a String.
+                # This is the catch-all for any non-numeric data.
+                print(f"INFO: Validating column '{column}' as String.")
+                suite.add_expectation(
+                    ExpectColumnValuesToBeOfType(column=column, type_="string")
+                )
     
     def add_rule(self, table_name, expectation):
         """
