@@ -186,7 +186,7 @@ def remove_run_from_master_tables(project_name, subproject_id, execution_iso_tim
     delete_data_by_timestamp(
         project_name=project_name,
         subproject_id=subproject_id,
-        timestamp_to_delete=execution_iso_timestamp,
+        execution_iso_timestamp=execution_iso_timestamp,
         spark_session=spark_session,
         target_database=target_database
     )
