@@ -99,11 +99,11 @@ def validate_data(datasets, rules=None, primary_keys=None):
     validator.register_datasets(datasets)
     
     # Add base validations with primary keys if provided
-    for table in datasets:
-        pk = None
-        if primary_keys and table in primary_keys:
-            pk = primary_keys[table]
-        validator.add_base_validations(table, primary_key=pk)
+    # for table in datasets:
+    #     pk = None
+    #     if primary_keys and table in primary_keys:
+    #         pk = primary_keys[table]
+    #     validator.add_base_validations(table, primary_key=pk)
     
     # Add custom rules if provided
     if rules:
