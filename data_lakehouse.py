@@ -12,8 +12,8 @@ from pyspark.sql.types import StructType, StructField, StringType, LongType, Dou
 
 def save_results_to_lakehouse(validator, project_name, subproject_id, spark_session, lakehouse_path):
     """
-    Save validation results into a timestamped folder, including the new 
-    detailed_issues table.
+    Saves validation results to a timestamped folder, with an explicit schema
+    definition to prevent VOID type errors when saving to Parquet.
     """
     if not project_name or not subproject_id:
         raise ValueError("Project name and subproject ID must be non-empty strings")
@@ -40,7 +40,7 @@ def save_results_to_lakehouse(validator, project_name, subproject_id, spark_sess
     }
 
     try:
-        # Save Project Summary
+        # Save Project Summary (no changes needed here)
         if project_summary_data:
             summary_spark_df = spark_session.createDataFrame(pd.DataFrame(project_summary_data))
             summary_path = f"{output_path}/project_summary"
@@ -48,25 +48,46 @@ def save_results_to_lakehouse(validator, project_name, subproject_id, spark_sess
             saved_paths["project_summary"] = summary_path
             print(f"✅ Saved Project Summary to {summary_path}")
 
-        # Save Detailed Rules
+        # Save other tables (no changes needed here)
         if not detailed_rules_df.empty:
-            detailed_spark_df = spark_session.createDataFrame(detailed_rules_df)
-            details_path = f"{output_path}/detailed_rules"
-            detailed_spark_df.write.format("parquet").mode("overwrite").save(details_path)
-            saved_paths["detailed_rules"] = details_path
-            print(f"✅ Saved Detailed Rules to {details_path}")
-
-        # Save Issues & Outliers (High Level)
+            spark_session.createDataFrame(detailed_rules_df).write.format("parquet").mode("overwrite").save(f"{output_path}/detailed_rules")
+            saved_paths["detailed_rules"] = f"{output_path}/detailed_rules"
+            print(f"✅ Saved Detailed Rules to {output_path}/detailed_rules")
         if not issues_outliers_df.empty:
-            issues_spark_df = spark_session.createDataFrame(issues_outliers_df)
-            issues_path = f"{output_path}/issues_outliers"
-            issues_spark_df.write.format("parquet").mode("overwrite").save(issues_path)
-            saved_paths["issues_outliers"] = issues_path
-            print(f"✅ Saved Issues & Outliers to {issues_path}")
+            spark_session.createDataFrame(issues_outliers_df).write.format("parquet").mode("overwrite").save(f"{output_path}/issues_outliers")
+            saved_paths["issues_outliers"] = f"{output_path}/issues_outliers"
+            print(f"✅ Saved Issues & Outliers to {output_path}/issues_outliers")
             
-        # NEW: Save Detailed Cell-Level Issues
+        # --- FIX IS HERE: EXPLICITLY DEFINE SCHEMA FOR DETAILED_ISSUES ---
         if not detailed_issues_df.empty:
-            detailed_issues_spark_df = spark_session.createDataFrame(detailed_issues_df)
+            # Define the schema to prevent VOID type errors
+            detailed_issues_schema = StructType([
+                StructField("project_id", StringType(), True),
+                StructField("subproject_id", StringType(), True),
+                StructField("table_name", StringType(), True),
+                StructField("column_name", StringType(), True),
+                StructField("row_num", LongType(), True),
+                StructField("timestamp", StringType(), True),
+                StructField("value", StringType(), True), # Treat value as string for flexibility
+                StructField("violation_not_null", StringType(), True),
+                StructField("violation_data_type", StringType(), True),
+                StructField("violation_in_set", StringType(), True),
+                StructField("violation_regex", StringType(), True),
+                StructField("violation_range", StringType(), True),
+                StructField("violation_unique", StringType(), True)
+            ])
+            
+            # Cast pandas dataframe columns to string to avoid conversion issues
+            for col in detailed_issues_df.columns:
+                 if col != 'row_num': # Keep row_num as numeric
+                    detailed_issues_df[col] = detailed_issues_df[col].astype(str).replace('nan', None)
+
+            # Create Spark DataFrame with the defined schema
+            detailed_issues_spark_df = spark_session.createDataFrame(
+                detailed_issues_df,
+                schema=detailed_issues_schema
+            )
+            
             detailed_issues_path = f"{output_path}/detailed_issues"
             detailed_issues_spark_df.write.format("parquet").mode("overwrite").save(detailed_issues_path)
             saved_paths["detailed_issues"] = detailed_issues_path
@@ -77,6 +98,7 @@ def save_results_to_lakehouse(validator, project_name, subproject_id, spark_sess
         raise
     
     return saved_paths
+
 
 def publish_results_to_tables(project_name, subproject_id, timestamp, spark_session, lakehouse_path, target_database):
     """
