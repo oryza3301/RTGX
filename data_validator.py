@@ -803,9 +803,8 @@ class DataGovernance:
     
     def get_detailed_cell_level_issues(self, project_name, subproject_id):
         """
-        Generates a detailed, cell-level issue log where each row represents a
-        specific cell that failed one or more validation rules. Handles all defined
-        rule types and will not crash on missing violation types.
+        Generates a detailed, cell-level issue log. Ensures all possible violation
+        columns are created before returning the DataFrame.
         """
         all_cell_issues = []
         execution_timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -826,7 +825,6 @@ class DataGovernance:
                 rule_type = config.get("type")
                 result_details = expectation.get("result", {})
     
-                # Skip if the failure details don't contain a list of unexpected values
                 if not column or 'partial_unexpected_list' not in result_details:
                     continue
                 
@@ -835,10 +833,8 @@ class DataGovernance:
                     continue
     
                 # Handle cases where failing values might include None/NaN which requires special handling
-                if any(pd.isna(v) for v in failing_values):
-                    failing_rows = df[df[column].isin(failing_values) | df[column].isnull()]
-                else:
-                    failing_rows = df[df[column].isin(failing_values)]
+                # Using dropna=False ensures we catch NaN values when comparing
+                failing_rows = df[df[column].isin(failing_values)]
     
                 for index, row in failing_rows.iterrows():
                     cell_issue = {
@@ -851,7 +847,6 @@ class DataGovernance:
                         "timestamp": execution_timestamp
                     }
     
-                    # --- Expanded logic to handle all your rule types ---
                     if rule_type == "expect_column_values_to_not_be_null":
                         cell_issue["violation_not_null"] = "X"
                     elif rule_type == "expect_column_values_to_be_of_type":
@@ -870,17 +865,20 @@ class DataGovernance:
                     all_cell_issues.append(cell_issue)
     
         if not all_cell_issues:
-            return pd.DataFrame()
+            # Return an empty dataframe with the correct structure if no issues
+            return pd.DataFrame(columns=[
+                "project_id", "subproject_id", "table_name", "column_name", "row_num",
+                "timestamp", "value", "violation_not_null", "violation_data_type",
+                "violation_in_set", "violation_regex", "violation_range", "violation_unique"
+            ])
     
         final_issues_df = pd.DataFrame(all_cell_issues)
         
-        # Define ALL possible violation columns that we can create
         all_possible_violation_cols = [
             'violation_not_null', 'violation_data_type', 'violation_in_set',
             'violation_regex', 'violation_range', 'violation_unique'
         ]
     
-        # Add any missing violation columns to the dataframe before aggregation
         for col in all_possible_violation_cols:
             if col not in final_issues_df.columns:
                 final_issues_df[col] = None
@@ -895,7 +893,6 @@ class DataGovernance:
             'violation_unique': 'first'
         }
         
-        # Group by the unique cell to consolidate all its violations into one row
         grouped_df = final_issues_df.groupby([
             "project_id", "subproject_id", "table_name", 
             "column_name", "row_num", "timestamp"
